@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-desensitize"
+version = "1.0.0"
+description = "Chinese-context desensitization for Hermes Agent — LLM semantic layer with regex fallback, reversible placeholders"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "yubingz" }]
+keywords = ["hermes", "hermes-agent", "plugin", "privacy", "pii", "desensitize", "redaction", "chinese"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Chinese (Simplified)",
+    "Topic :: Security",
+]
+dependencies = [
+    "jieba>=0.42,<1",
+    "PyYAML>=6,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/yubingz/hermes-desensitize"
+Source = "https://github.com/yubingz/hermes-desensitize"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hermes_desensitize = ["default_config.yaml", "plugin.yaml", "jieba_dict.txt"]

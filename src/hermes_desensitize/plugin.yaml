@@ -1,0 +1,11 @@
+name: desensitize
+version: 1.0.0
+description: "Chinese-context desensitization — LLM semantic layer with regex fallback and reversible placeholders"
+author: yubingz
+requires_hermes: ">=0.19"
+provides_hooks:
+  - pre_llm_call
+  - pre_api_request
+  - transform_llm_output
+  - post_llm_call
+provides_tools: []
