@@ -232,7 +232,17 @@ def _quantity_re() -> re.Pattern:
 
 PATTERNS: list[tuple[str, str]] = [
     # 中文公司/机构名
-    (r"(?<![\\u4e00-\\u9fff])[\\u4e00-\\u9fff]{2,8}(?:有限公司|集团公司|股份有限公司|有限责任公司"
+    # 注意：CJK 区间的转义写成 `\\u4e00` 会变成"字面反斜杠 + u4e00"，
+    # 整个字符类再也匹配不到汉字（原文件里的既有 bug）。
+    # 高校那条用的是 `[一-龥]` 字面量，是对的；这里统一用字面量避免转义歧义。
+    # [一-龥]{2,8} 是个贪心的"任意汉字"区间，会把前面的单字虚词一起吃进公司名。
+    # 典型触发：文本先经过本体占位符替换（"本项目"→"[本项目]"），此时 "由" 前面
+    # 不再是汉字，lookbehind 放行 → 匹配到 "由北京某某科技有限公司"。
+    # 且 lookbehind 里的排除集若做成变量长 lookbehind，正则引擎会对每个起点回溯
+    # 逐个试长度，代价高且行为难预测。稳妥做法：先以 [一-龥]{2,10} 匹配（多留余量），
+    # 匹配后再剥掉开头的虚词（见"公司名清洗"）。
+    (r"(?<![一-龥])[一-龥]{2,10}"
+     r"(?:有限公司|集团公司|股份有限公司|有限责任公司"
      r"|研究院|研究所|设计院|设计研究院"
      r"|支行|分行|营业部|联社|总厂|分厂"
      r"|局|委员会|办公室|办公厅)", "org"),
@@ -307,6 +317,10 @@ _PATTERN_PRIORITY: dict[str, int] = {
     "email": 90, "idcard": 90, "phone": 90, "ip": 90,
     "org": 50, "school": 50, "address": 50, "org_jieba": 50, "person": 60,
 }
+
+# 公司名正则的引导虚词：这些字若出现在匹配串开头，是从前面的句子成分里被
+# "任意汉字"区间误吃的，需剥掉（见 regex_desensitize 里的清洗逻辑）。
+_ORG_LEAD_STRIP = "由是为对向从与和及在"
 
 
 # ──────────────────────────────────────────────
@@ -400,7 +414,16 @@ def regex_desensitize(text: str) -> tuple[str, dict]:
 
     for pattern, ptype in PATTERNS:
         for m in re.finditer(pattern, result):
-            all_matches.append((m.start(), m.end(), m.group(), ptype))
+            text_m, start_m, end_m = m.group(), m.start(), m.end()
+            if ptype == "org":
+                # 剥掉被贪心区间吃进来的引导虚词（"由/是/为/对/向/从/与/和/及/在"）。
+                # 只剥开头，且保证剥完还剩 ≥2 个汉字，避免把公司名剥空。
+                while text_m and text_m[0] in _ORG_LEAD_STRIP and len(text_m) - 1 >= 2:
+                    text_m = text_m[1:]
+                    start_m += 1
+                if len(text_m) < 2:
+                    continue
+            all_matches.append((start_m, end_m, text_m, ptype))
 
     for _pre in _path_res():
         for m in _pre.finditer(result):
