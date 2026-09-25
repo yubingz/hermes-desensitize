@@ -1037,16 +1037,27 @@ def _handle_desensitize(raw: str) -> Optional[str]:
             return "无效值，请输入整数"
 
     elif cmd in ("status", ""):
-        status = "已启用" if _enabled else "已关闭"
+        status = "已启用 / enabled" if _enabled else "已关闭 / disabled"
         count = sum(len(m) for m in _mappings.values())
-        provider_info = _OLLAMA_BASE or "N/A" if _LLM_PROVIDER == "ollama" else "api.siliconflow.cn"
+        # 报告真实端点而非硬编码标签：配了 llm.base_url（或 OPENAI_BASE_URL）时
+        # 走的是自定义端点，旧代码一律显示 api.siliconflow.cn，会掩盖原文实际
+        # 发往哪里 —— 对隐私工具这是必须准确的字段。
+        if _LLM_PROVIDER == "ollama":
+            provider_info = _OLLAMA_BASE or "N/A"
+        else:
+            provider_info = str(
+                _cfg.get("llm.base_url", "") or os.environ.get("OPENAI_BASE_URL", "")
+                or _SILICONFLOW_BASE).rstrip("/")
+        egress = ("本地 / local" if _LLM_PROVIDER == "ollama"
+                  else "云端 / REMOTE — 原文未脱敏前发往此端点")
         return (
             f"脱敏状态: {status}\n"
-            f"  提供方: {_LLM_PROVIDER}\n"
+            f"  Provider: {_LLM_PROVIDER}\n"
             f"  主引擎: {_LLM_MODEL}（超时 {_LLM_TIMEOUT}s）\n"
-            f"  端点:   {provider_info}\n"
+            f"  Endpoint: {provider_info}\n"
+            f"  Egress:   {egress}\n"
             f"  分段:   每段 ≤{_CHUNK_MAX_CHARS} 字\n"
-            f"  回退:   正规则则（{len(PATTERNS)} 类）\n"
+            f"  回退:   正则规则（{len(PATTERNS)} 类）\n"
             f"  本体:   本公司/本人/本项目 → 固定占位符\n"
             f"  数量级: 产值/市场等数据 → [xxx数量级]\n"
             f"  不处理: 论文/专利/站名/技术参数\n"
@@ -1058,12 +1069,16 @@ def _handle_desensitize(raw: str) -> Optional[str]:
 
     else:
         return (
-            "用法:\n"
-            "  /desensitize on                            启用脱敏\n"
-            "  /desensitize off                           关闭脱敏\n"
-            "  /desensitize status                        查看状态\n"
-            "  /desensitize model <模型名>                 切换模型\n"
-            "  /desensitize model ollama:<模型名>         切到 Ollama\n"
+            "Usage / 用法:\n"
+            "  /desensitize on                            启用脱敏 / enable\n"
+            "  /desensitize off                           关闭脱敏 / disable (original text goes to the model)\n"
+            "  /desensitize status                        查看状态 / show status, including egress endpoint\n"
+            "  /desensitize model <name>                  切换模型 / switch model\n"
+            "  /desensitize model ollama:<name>           切到 Ollama（本地）/ switch to local Ollama\n"
+            "  /desensitize model openai:<name>           切到 OpenAI 兼容端点 / switch to an OpenAI-compatible endpoint\n"
+            "                                             (base_url: config llm.base_url, else OPENAI_BASE_URL;\n"
+            "                                              falls back to api.siliconflow.cn when neither is set)\n"
+
             "  /desensitize model siliconflow:<模型名>    切到 SiliconFlow\n"
             "  /desensitize timeout <秒数>                 设置 LLM 超时\n"
             "  /desensitize chunk <字数>                   设置分段大小"
@@ -1089,7 +1104,7 @@ def register(ctx):
     ctx.register_command(
         name="desensitize",
         handler=_handle_desensitize,
-        description="脱敏管理 (LLM主脱敏 + 正则回退 + 自动分段)",
+        description="Manage Chinese-context desensitization (LLM semantic layer + regex fallback)",
         args_hint="on|off|status|model|timeout|chunk",
     )
 

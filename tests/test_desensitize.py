@@ -4,10 +4,10 @@ import sys, json, logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s|%(message)s")
 
 sys.path.insert(0, '.')
-import importlib.util
-spec = importlib.util.spec_from_file_location('plugin', '__init__.py')
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+sys.path.insert(0, 'src')
+# 插件用相对导入（from . import config），必须以包内模块方式加载，
+# 不能按文件路径 exec_module —— 那样没有 parent package，相对导入会失败。
+import hermes_desensitize.plugin as mod
 
 # 测试文本
 test_text = "最近我们公司和华为合作了一个项目，预计明年销售额达到8000万元，项目负责人是张伟和李明，后续由王芳跟进。"

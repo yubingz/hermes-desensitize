@@ -97,6 +97,23 @@ llm:
   api_key_env: SILICONFLOW_API_KEY   # 只写环境变量名，不写明文 key
 ```
 
+### 数据出口（务必先读）
+
+**语义脱敏层需要把「尚未脱敏的原文」发给 LLM**——它必须先看到原文才能认出人名/公司名。这是设计使然，不是 bug，但你必须知道自己把数据发到了哪里：
+
+| 配置 | 原文去向 | 是否出本机 |
+|---|---|---|
+| `provider: ollama`（默认） | 本机 `OLLAMA_HOST`（默认 `localhost:11434`） | 否 |
+| `provider: openai` + 设了 `base_url` | 你指定的端点 | 取决于端点 |
+| `provider: openai` **未设 `base_url`** | 回退到 `OPENAI_BASE_URL`，两者都没有则**回退到 `https://api.siliconflow.cn/v1`** | **是** |
+
+第三行是容易踩的坑：只要你设了 `provider: openai` 而忘了 `base_url`，原文（含真实人名、公司名、金额）就会发往硅基流动的云端。想保证不出本机，二选一：
+
+- 保持 `provider: ollama`（默认）；
+- 或设 `provider: openai` 时**同时设 `base_url`** 指向你信任的端点（本地 vLLM / LM Studio 填 `http://localhost:8000/v1`）。
+
+`/desensitize status` 会打印实际生效的端点和 Egress 标记，发数据前可先核对。若 LLM 不可达，插件按 `behavior.regex_fallback` 回退到纯正则脱敏（不出本机）。
+
 ## 会话内命令
 
 ```

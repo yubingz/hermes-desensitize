@@ -1,8 +1,11 @@
 name: desensitize
 version: 1.0.0
-description: "Chinese-context desensitization — LLM semantic layer with regex fallback and reversible placeholders"
+description: "Chinese-context desensitization — LLM semantic layer with regex fallback and reversible placeholders. The semantic layer sends pre-redaction text to the configured LLM (default: local Ollama); see README for the provider fallback and how to keep it local."
 author: yubingz
 requires_hermes: ">=0.19"
+python_dependencies:
+  - "jieba>=0.42,<1"
+  - "PyYAML>=6,<7"
 provides_hooks:
   - pre_llm_call
   - pre_api_request
