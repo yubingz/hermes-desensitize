@@ -116,14 +116,20 @@ llm:
 
 ## 会话内命令
 
+命令的所有反馈（`on`/`off`/`model`/`timeout`/`chunk` 的确认、`status` 的字段标签、
+错误提示、用法列表）都是**英中双语**，英文在前：
+
 ```
-/desensitize on          开启
-/desensitize off         关闭
-/desensitize status      查看当前配置与状态
+/desensitize on          开启 / enable
+/desensitize off         关闭 / disable
+/desensitize status      查看当前配置与状态 / show status, including egress endpoint
 /desensitize model qwen3:14b
 /desensitize timeout 20
 /desensitize chunk 4000
 ```
+
+命令反馈是插件唯一对非中文使用者可见的界面，因此不随 README 走中文单语 —— 只给中文
+会让这条路径对英文用户不可读。README 本身仍以中文为主（面向的场景就是中文对话）。
 
 ## 已知边界
 

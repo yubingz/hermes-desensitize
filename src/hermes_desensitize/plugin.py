@@ -961,7 +961,12 @@ def _pre_api_request(**kwargs: Any) -> None:
 # ──────────────────────────────────────────────
 
 def _handle_desensitize(raw: str) -> Optional[str]:
-    """处理 /desensitize on|off|status|model|timeout|chunk"""
+    """处理 /desensitize on|off|status|model|timeout|chunk
+
+    所有面向用户的输出均为「英文在前、中文在后」的双语形式：命令反馈是插件唯一
+    对非中文使用者可见的界面，只给中文会让这条路径对英文用户不可读（review
+    #122574 提出）。前缀标签只在 on/status 两处出现，用同一套即可。
+    """
     global _enabled, _LLM_PROVIDER, _LLM_MODEL, _LLM_TIMEOUT, _CHUNK_MAX_CHARS, _OLLAMA_BASE
 
     args = raw.strip().split()
@@ -973,13 +978,14 @@ def _handle_desensitize(raw: str) -> Optional[str]:
     if cmd == "on":
         _enabled = False  # 保持关闭——需要 config.yaml 和重启才能启用
         return (
-            f"脱敏已启用\n"
-            f"  提供方: {_LLM_PROVIDER}\n"
-            f"  主引擎: {_LLM_MODEL}（超时 {_LLM_TIMEOUT}s）\n"
-            f"  分段:   每段 ≤{_CHUNK_MAX_CHARS} 字\n"
-            f"  回退:   正规则则（{len(PATTERNS)} 类, <1ms）\n"
-            f"  本体:   本公司/本人/本项目 → 固定占位符\n"
-            f"  数量级: 产值/市场等数据 → [xxx数量级]"
+            f"Desensitization enabled / 脱敏已启用\n"
+            f"  Provider / 提供方: {_LLM_PROVIDER}\n"
+            f"  Engine / 主引擎:   {_LLM_MODEL} (timeout / 超时 {_LLM_TIMEOUT}s)\n"
+            f"  Chunk / 分段:      ≤{_CHUNK_MAX_CHARS} chars / 字\n"
+            f"  Fallback / 回退:   regex rules / 正则规则 ({len(PATTERNS)} kinds / 类, <1ms)\n"
+            f"  Self / 本体:       this-company/self/this-project → fixed placeholder\n"
+            f"                     （本公司/本人/本项目 → 固定占位符）\n"
+            f"  Magnitude / 数量级: output/market figures → [xxx数量级]"
         )
 
     elif cmd == "off":
@@ -987,57 +993,67 @@ def _handle_desensitize(raw: str) -> Optional[str]:
         _mappings.clear()
         _desensitize_cache.clear()
         _restore_index.clear()
-        return "脱敏已关闭，消息原文直发云端"
+        return ("Desensitization disabled — original text goes to the model unredacted\n"
+                "脱敏已关闭，消息原文直发云端")
 
     elif cmd == "model":
         if len(args) < 2:
             return (
-                f"当前提供方: {_LLM_PROVIDER}\n"
-                f"当前模型: {_LLM_MODEL}\n"
-                f"用法:\n"
-                f"  /desensitize model <模型名>            切换模型\n"
-                f"  /desensitize model ollama:<模型名>    切换到 Ollama（本地）\n"
-                f"  /desensitize model openai:<模型名>    切换到 OpenAI 兼容端点\n"
-                f"                                        （base_url 读配置 llm.base_url 或 OPENAI_BASE_URL）"
+                f"Current provider / 当前提供方: {_LLM_PROVIDER}\n"
+                f"Current model / 当前模型: {_LLM_MODEL}\n"
+                f"Usage / 用法:\n"
+                f"  /desensitize model <name>          switch model / 切换模型\n"
+                f"  /desensitize model ollama:<name>   switch to local Ollama / 切换到 Ollama（本地）\n"
+                f"  /desensitize model openai:<name>   switch to an OpenAI-compatible endpoint\n"
+                f"                                     切换到 OpenAI 兼容端点\n"
+                f"                                     (base_url: config llm.base_url, else OPENAI_BASE_URL\n"
+                f"                                      base_url 读配置 llm.base_url 或 OPENAI_BASE_URL)"
             )
         val = args[1]
         if val.startswith("ollama:"):
             _LLM_PROVIDER = "ollama"
             _LLM_MODEL = val[7:]
-            return f"已切换到 Ollama，模型: {_LLM_MODEL}"
+            return (f"Switched to Ollama, model: {_LLM_MODEL}\n"
+                    f"已切换到 Ollama，模型: {_LLM_MODEL}")
         elif val.startswith("openai:") or val.startswith("siliconflow:"):
             _LLM_PROVIDER = "openai"
             _LLM_MODEL = val.split(":", 1)[1]
-            return f"已切换到 OpenAI 兼容端点，模型: {_LLM_MODEL}"
+            return (f"Switched to OpenAI-compatible endpoint, model: {_LLM_MODEL}\n"
+                    f"已切换到 OpenAI 兼容端点，模型: {_LLM_MODEL}")
         _LLM_MODEL = val
-        return f"LLM 模型已切换为 {_LLM_MODEL}"
+        return (f"LLM model set to {_LLM_MODEL}\n"
+                f"LLM 模型已切换为 {_LLM_MODEL}")
 
     elif cmd == "timeout":
         if len(args) < 2:
-            return f"当前超时: {_LLM_TIMEOUT}s（每段独立计时）\n用法: /desensitize timeout <秒数>"
+            return (f"Current timeout / 当前超时: {_LLM_TIMEOUT}s (per chunk / 每段独立计时)\n"
+                    f"Usage / 用法: /desensitize timeout <seconds / 秒数>")
         try:
             val = int(args[1])
             if val < 5:
-                return "超时最少 5s"
+                return "Timeout must be at least 5s / 超时最少 5s"
             _LLM_TIMEOUT = val
-            return f"LLM 超时已设为 {_LLM_TIMEOUT}s（多段时每段均分）"
+            return (f"LLM timeout set to {_LLM_TIMEOUT}s (split across chunks)\n"
+                    f"LLM 超时已设为 {_LLM_TIMEOUT}s（多段时每段均分）")
         except ValueError:
-            return "无效值，请输入整数秒"
+            return "Invalid value — enter an integer number of seconds / 无效值，请输入整数秒"
 
     elif cmd == "chunk":
         if len(args) < 2:
-            return f"当前分段: {_CHUNK_MAX_CHARS} 字\n用法: /desensitize chunk <字符数>"
+            return (f"Current chunk size / 当前分段: {_CHUNK_MAX_CHARS} chars / 字\n"
+                    f"Usage / 用法: /desensitize chunk <characters / 字符数>")
         try:
             val = int(args[1])
             if val < 500:
-                return "分段最少 500 字"
+                return "Chunk size must be at least 500 / 分段最少 500 字"
             _CHUNK_MAX_CHARS = val
-            return f"分段大小已设为 {_CHUNK_MAX_CHARS} 字"
+            return (f"Chunk size set to {_CHUNK_MAX_CHARS} chars\n"
+                    f"分段大小已设为 {_CHUNK_MAX_CHARS} 字")
         except ValueError:
-            return "无效值，请输入整数"
+            return "Invalid value — enter an integer / 无效值，请输入整数"
 
     elif cmd in ("status", ""):
-        status = "已启用 / enabled" if _enabled else "已关闭 / disabled"
+        status = "enabled / 已启用" if _enabled else "disabled / 已关闭"
         count = sum(len(m) for m in _mappings.values())
         # 报告真实端点而非硬编码标签：配了 llm.base_url（或 OPENAI_BASE_URL）时
         # 走的是自定义端点，旧代码一律显示 api.siliconflow.cn，会掩盖原文实际
@@ -1048,23 +1064,25 @@ def _handle_desensitize(raw: str) -> Optional[str]:
             provider_info = str(
                 _cfg.get("llm.base_url", "") or os.environ.get("OPENAI_BASE_URL", "")
                 or _SILICONFLOW_BASE).rstrip("/")
-        egress = ("本地 / local" if _LLM_PROVIDER == "ollama"
-                  else "云端 / REMOTE — 原文未脱敏前发往此端点")
+        egress = ("local / 本地" if _LLM_PROVIDER == "ollama"
+                  else "REMOTE — text is sent here BEFORE redaction / 云端 — 原文未脱敏前发往此端点")
         return (
-            f"脱敏状态: {status}\n"
+            f"Status / 脱敏状态: {status}\n"
             f"  Provider: {_LLM_PROVIDER}\n"
-            f"  主引擎: {_LLM_MODEL}（超时 {_LLM_TIMEOUT}s）\n"
+            f"  Engine / 主引擎:   {_LLM_MODEL} (timeout / 超时 {_LLM_TIMEOUT}s)\n"
             f"  Endpoint: {provider_info}\n"
-            f"  Egress:   {egress}\n"
-            f"  分段:   每段 ≤{_CHUNK_MAX_CHARS} 字\n"
-            f"  回退:   正则规则（{len(PATTERNS)} 类）\n"
-            f"  本体:   本公司/本人/本项目 → 固定占位符\n"
-            f"  数量级: 产值/市场等数据 → [xxx数量级]\n"
-            f"  不处理: 论文/专利/站名/技术参数\n"
-            f"  架构:   pre_llm_call 原位替换\n"
-            f"          + transform_llm_output 还原\n"
-            f"          + post_llm_call 恢复会话（确保 DB 存原文）\n"
-            f"  当前映射: {count} 项"
+            f"  Egress / 出网:     {egress}\n"
+            f"  Chunk / 分段:      ≤{_CHUNK_MAX_CHARS} chars / 字\n"
+            f"  Fallback / 回退:   regex rules / 正则规则 ({len(PATTERNS)} kinds / 类)\n"
+            f"  Self / 本体:       this-company/self/this-project → fixed placeholder\n"
+            f"                     （本公司/本人/本项目 → 固定占位符）\n"
+            f"  Magnitude / 数量级: output/market figures → [xxx数量级]\n"
+            f"  Skipped / 不处理:  papers/patents/site names/tech parameters\n"
+            f"                     （论文/专利/站名/技术参数）\n"
+            f"  Architecture / 架构: pre_llm_call in-place substitution / 原位替换\n"
+            f"                       + transform_llm_output restore / 还原\n"
+            f"                       + post_llm_call session restore / 恢复会话（确保 DB 存原文）\n"
+            f"  Mappings / 当前映射: {count} items / 项"
         )
 
     else:
@@ -1079,9 +1097,9 @@ def _handle_desensitize(raw: str) -> Optional[str]:
             "                                             (base_url: config llm.base_url, else OPENAI_BASE_URL;\n"
             "                                              falls back to api.siliconflow.cn when neither is set)\n"
 
-            "  /desensitize model siliconflow:<模型名>    切到 SiliconFlow\n"
-            "  /desensitize timeout <秒数>                 设置 LLM 超时\n"
-            "  /desensitize chunk <字数>                   设置分段大小"
+            "  /desensitize model siliconflow:<name>      switch to SiliconFlow / 切到 SiliconFlow\n"
+            "  /desensitize timeout <seconds>             set LLM timeout / 设置 LLM 超时\n"
+            "  /desensitize chunk <characters>            set chunk size / 设置分段大小"
         )
 
 
