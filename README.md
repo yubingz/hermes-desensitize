@@ -64,6 +64,34 @@ pip install jieba pyyaml
 # 在 ~/.hermes/config.yaml 的 plugins.enabled 中加入 desensitize
 ```
 
+### 升级
+
+包内容整目录替换即可：
+
+```bash
+git -C hermes-desensitize pull
+rm -rf ~/.hermes/plugins/desensitize
+cp -r hermes-desensitize/src/hermes_desensitize ~/.hermes/plugins/desensitize
+```
+
+**备份不要放在 `~/.hermes/plugins/` 里面。** Hermes 会把该目录下**每个**含
+`plugin.yaml` 的子目录都当成一个插件加载，两个同 `name` 的目录会产生冲突 ——
+加载到哪个不确定，`hermes` 里看到的版本号可能是旧的。要备份就放到别处：
+
+```bash
+cp -r ~/.hermes/plugins/desensitize ~/.hermes/plugin_backups/desensitize_$(date +%F)
+```
+
+升级/改代码后若命令行为没变，先确认加载的是哪一份：
+
+```python
+from hermes_cli.plugins import PluginManager
+pm = PluginManager(); pm.discover_and_load()
+print([(p['key'], p['version']) for p in pm.list_plugins() if 'desens' in p['key']])
+```
+
+版本号应是 `plugin.yaml` 里的值；若看到旧版本号或看到两个条目，就是有残留副本。
+
 ## 配置
 
 三层覆盖，后者赢：包内 `default_config.yaml` → `~/.hermes/desensitize.yaml` → 环境变量 `DESENSITIZE_*`。
