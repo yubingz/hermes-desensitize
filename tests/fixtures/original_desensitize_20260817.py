@@ -12,7 +12,6 @@
 不依赖外部代理，不改 base_url，始终可用。
 """
 
-import difflib
 import json
 import logging
 import os
@@ -22,134 +21,17 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-# 相对导入：作为 Hermes 目录插件加载时，本模块的包名是 hermes_plugins.desensitize，
-# 绝对导入 "hermes_desensitize" 会 ModuleNotFoundError（pip 安装场景才存在该顶层包）。
-from . import config as _cfg
-
 log = logging.getLogger("hermes_plugin.desensitize")
 
-# ── 运行时配置 ──
-# 三层来源（后者覆盖前者）：
-#   1. 包内默认值 src/hermes_desensitize/default_config.yaml
-#   2. 用户文件 ~/.hermes/desensitize.yaml
-#   3. DESENSITIZE_* 环境变量（嵌套用双下划线，如 DESENSITIZE_LLM__TIMEOUT）
-# 下面这些模块级变量是第 4 层：**会话内临时覆盖**（/desensitize 命令写，
-# 不落盘、重启即失效）。启动时由 _sync_from_config() 从上面三层填充。
-_enabled = True
-# 命令输出语言：both（英中双语，默认）/ en（纯英文）/ zh（纯中文）。
-# 只影响 /desensitize 的文字，不影响脱敏行为。
-_UI_LANG = "both"
-# help 输出的语言。与 ui.language 分开：help 面向「还不知道怎么用」的人（第一次
-# 用、语言还没配），默认 en 保证读不了中文的人打开帮助时看得懂。可选 en/zh/both。
-_HELP_LANG = "en"
-# 会话内是否用 /desensitize lang 显式选过语言。选过后 help 也跟随该语言：
-# 「help 默认英文」的理由是「语言还没配时也要看得懂」，用户明确表态后理由不成立。
-_HELP_LANG_EXPLICIT = False
-
-
-def L(en: str, zh: str) -> str:
-    """按 ui.language 选择命令输出文字。
-
-    ``L("Engine", "主引擎")`` → both 时 "Engine / 主引擎"，en 时 "Engine"，zh 时 "主引擎"。
-    命令反馈是这个插件唯一对非中文使用者可见的界面，所以必须可选纯英文；
-    双语作为默认，是因为它不丢任何读者（改动前只有中文）。
-    """
-    return _pick(_UI_LANG, en, zh)
-
-
-def _HELP_L(en: str, zh: str) -> str:
-    """按 help_language 选择 help 文字（默认 en，见 :data:`_HELP_LANG`）。
-
-    会话内用 `/desensitize lang` 显式选过语言后，help 跟随该语言而不是
-    help_language —— 否则用户设了 zh、再看 help 还是满屏英文，像「没生效」。
-    """
-    return _pick(_UI_LANG if _HELP_LANG_EXPLICIT else _HELP_LANG, en, zh)
-
-
-def _pick(lang: str, en: str, zh: str) -> str:
-    """三态取值。无法识别时按 both 渲染（调用方应先用 _norm_lang 校验）。"""
-    if lang == "en":
-        return en
-    if lang == "zh":
-        return zh
-    return f"{en} / {zh}" if en and zh else (en or zh)
-
-
-def _norm_lang(value: Any, default: str) -> str:
-    """校验语言取值；无法识别时告警并回落。"""
-    lang = str(value or default).strip().lower()
-    if lang not in ("both", "en", "zh"):
-        log.warning("desensitize: 语言值 %r 无法识别，回退 %s（可选 en/zh/both）", lang, default)
-        return default
-    return lang
-
-
-# /desensitize lang 的输入别名。用户自然会写 cn / 中文 / english —— 只认 zh 会
-# 让人以为「命令没生效」（实测笔误 leng cn 静默回落到 help）。取值仍是规范三元组。
-_LANG_ALIASES = {
-    "both": "both", "双语": "both", "中英": "both", "bilingual": "both",
-    "en": "en", "english": "en", "英文": "en",
-    "zh": "zh", "cn": "zh", "chinese": "zh", "中文": "zh",
-}
-
-
-def _sync_from_config() -> None:
-    """把配置层的值同步到模块级变量。register() 时调用一次。"""
-    global _LLM_PROVIDER, _LLM_MODEL, _LLM_TIMEOUT, _CHUNK_MAX_CHARS
-    global _SELF_PATTERNS, _PUBLIC_ENTITIES, _QUANTITY_KEYWORDS, _PATH_PATTERNS
-    global _REGEX_FALLBACK, _UI_LANG, _HELP_LANG, _HELP_LANG_EXPLICIT
-
-    _enabled = bool(_cfg.get("behavior.enabled_by_default", True))
-    _REGEX_FALLBACK = bool(_cfg.get("behavior.regex_fallback", True))
-    _UI_LANG = _norm_lang(_cfg.get("ui.language", "both"), "both")
-    _HELP_LANG = _norm_lang(_cfg.get("ui.help_language", "en"), "en")
-    _HELP_LANG_EXPLICIT = False  # 会话内显式选择由 /desensitize lang 设置
-    _LLM_PROVIDER = str(_cfg.get("llm.provider", "ollama"))
-    _LLM_MODEL = str(_cfg.get("llm.model", "qwen3:8b"))
-    _LLM_TIMEOUT = int(_cfg.get("llm.timeout", 10))
-    _CHUNK_MAX_CHARS = int(_cfg.get("chunk_max_chars", 2000))
-
-    sp = _cfg.get("self_patterns", [])
-    if sp:
-        _SELF_PATTERNS = [(p[0], p[1]) for p in sp if isinstance(p, (list, tuple)) and len(p) == 2]
-    pe = _cfg.get("public_entities", [])
-    if pe:
-        _PUBLIC_ENTITIES = set(pe)
-
-    qk = _cfg.get("quantity.keywords", "")
-    if qk:
-        _QUANTITY_KEYWORDS = str(qk)
-    _QUANTITY_ENABLED = bool(_cfg.get("quantity.enabled", True))
-
-    if _cfg.get("path_masking.enabled", True):
-        pps = _cfg.get("path_masking.patterns", [])
-        if pps:
-            _PATH_PATTERNS = [re.compile(p) for p in pps]
-
-
-_LLM_PROVIDER = "ollama"            # "ollama" | "openai"
-_LLM_MODEL = "qwen3:8b"
-_LLM_TIMEOUT = 10
-_CHUNK_MAX_CHARS = 2000
-_REGEX_FALLBACK = True
-_QUANTITY_ENABLED = True
-_QUANTITY_KEYWORDS = "产能|产量|产值|年产|月产|日产|营收|销售额|利润|市场份额|市值|估值"
-_PATH_PATTERNS: list = []
-
+# ── 运行时配置（可通过 /desensitize 命令调整）──
+_enabled = True  # 默认开启（/desensitize off 可关闭）
+_LLM_PROVIDER = "ollama"            # "ollama" | "siliconflow"
+_LLM_MODEL = "hermes3:8b-llama3.1-q4_K_M"             # 模型名（Ollama 或 SiliconFlow 的模型 ID）
+_LLM_TIMEOUT = 10                   # 秒，超时后回退正则（长文本分段后每段独立超时）
+_CHUNK_MAX_CHARS = 2000              # 分段阈值
 _OLLAMA_BASE: str | None = None     # Ollama 地址（仅 provider=ollama 时使用）
+_SILICONFLOW_API_KEY = os.environ.get("OPENAI_API_KEY", "")  # SiliconFlow API Key
 _SILICONFLOW_BASE = "https://api.siliconflow.cn/v1"
-
-
-def _api_key() -> str:
-    """按配置读 API key 的环境变量。不落盘、不硬编码 key 本身。"""
-    env_name = str(_cfg.get("llm.api_key_env", "OPENAI_API_KEY"))
-    return os.environ.get(env_name, "")
-
-
-def _ollama_host() -> str:
-    """Ollama 地址：配置 > OLLAMA_HOST > 本机默认。"""
-    host = str(_cfg.get("llm.ollama_host", "") or os.environ.get("OLLAMA_HOST", ""))
-    return host or "http://127.0.0.1:11434"
 
 # ── Per-session 映射缓存 ──
 # _mappings[session_id] = {"[本公司]": "原文", ...}
@@ -179,27 +61,26 @@ def _content_hash(content: str) -> str:
     return _hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()
 
 # ── 本体占位符（固定，不编号）──
-# 这些是对话上下文自明的引用，不需要模糊处理。
-# 启动时由 _sync_from_config() 从 default_config.yaml 的 self_patterns 覆盖。
+# 这些是对话上下文自明的引用，不需要模糊处理
 _SELF_PATTERNS: list[tuple[str, str]] = [
     (r'我们公司|我公司|我司|本公司', '[本公司]'),
     (r'我自己|我本人|本人', '[本人]'),
     (r'这个项目|此项目|本项目', '[本项目]'),
 ]
 
-# 公开知名实体 — 分词器可能标为人名/机构名，但属于公共信息不脱敏。
-# 启动时由 _sync_from_config() 从 default_config.yaml 的 public_entities 覆盖。
-# 这里的内置表是"配置缺失时的保底"，用户应在 ~/.hermes/desensitize.yaml 里
-# 按自己的国家/行业替换（比如加入本国运营商、监管机构、常见合作方）。
+# 公开知名实体 — jieba 可能标为人名/机构名，但属于公共信息不脱敏
 _PUBLIC_ENTITIES: set[str] = {
     '华为', '华为技术有限公司',
     '腾讯', '阿里', '阿里巴巴', '百度', '字节跳动', '京东', '小米', '网易', '美团',
-    '中兴', '中兴通讯', '三星', '苹果', '微软', '谷歌',
+    '中兴', '中兴通讯', '大唐', '大唐电信', '三星', '苹果', '微软', '谷歌',
     '亚马逊', 'Meta', 'OpenAI',
     '特斯拉', '英伟达', '英特尔', '高通', 'IBM', 'Oracle', 'SAP',
     '中国移动', '中国联通', '中国电信', '中国铁塔',
+    '国家电网', '南方电网', '华能', '华电', '大唐集团', '国家电投', '国家能源',
+    '中石油', '中石化', '中海油',
     '清华大学', '北京大学', '浙江大学', '上海交通大学', '复旦大学',
     '哈尔滨工业大学', '西安交通大学',
+    '北斗', '北斗卫星', '北斗卫星导航系统',
     'IEEE', '3GPP', 'ITU', 'ETSI', '5G', '4G', '3G',
 }
 
@@ -253,9 +134,9 @@ def _chunk_text(text: str, max_chars: int = _CHUNK_MAX_CHARS) -> list[str]:
 
 def _detect_ollama_host() -> str:
     candidates = [
-        "http://localhost:11434",    # 本机 Ollama（最常见部署，优先探测）
-        "http://[内网IP1]:11434",    # WSL 默认网关（Windows 主机）
+        "http://172.21.0.1:11434",    # WSL 默认网关（Windows 主机）
         "http://host.docker.internal:11434",
+        "http://localhost:11434",
     ]
     for url in candidates:
         try:
@@ -279,37 +160,30 @@ _SELF_RE = re.compile(
     r'|这个项目|此项目|本项目)'
 )
 
-# 数量级模式：产值/市场/产能等数据 → [数量级N]。关键词从配置读取（quantity.keywords）。
-# 注意：正则必须是**函数**而非模块级常量 —— 因为 _QUANTITY_KEYWORDS 会被
-# _sync_from_config() 在 register() 时覆盖，模块级 re.compile 会冻住旧值。
-def _quantity_re() -> re.Pattern:
-    return re.compile(
-        r'(?:' + _QUANTITY_KEYWORDS + r')'
-        r'.{0,30}?\d+[.,]?\d*\s*'
-        r'(?:GWh|MWh|kWh|GW|MW|kW|亿元|万元|亿美元|欧元|美元|公斤|吨'
-        r'|台|件|套|斤|辆|架|艘|只|条|批|次|亿|万|元|%|％)'
-    )
+# 数量级模式：产值/市场/产能等数据 → [xxx数量级]
+_QUANTITY_RE = re.compile(
+    r'(?:产能|产量|产值|年产|月产|日产'
+    r'|销售|营收|收入|利润|毛利|净利|营业额|成交额|交易额|销售额'
+    r'|成本|预算|投资|融资|估值|市值|总资产|净资产|负债|毛利率|净利率'
+    r'|市场|份额|占有率|渗透率|覆盖率|市占率|排名|排行'
+    r'|第[一二三四五六七八九十\d]+名)'
+    r'.{0,30}?\d+[.,]?\d*\s*'
+    r'(?:GWh|MWh|kWh|GW|MW|kW|亿元|万元|亿美元|欧元|美元|公斤|吨'
+    r'|台|件|套|斤|辆|架|艘|只|条|批|次|亿|万|元|%|％)'
+)
 
 PATTERNS: list[tuple[str, str]] = [
     # 中文公司/机构名
-    # 注意：CJK 区间的转义写成 `\\u4e00` 会变成"字面反斜杠 + u4e00"，
-    # 整个字符类再也匹配不到汉字（原文件里的既有 bug）。
-    # 高校那条用的是 `[一-龥]` 字面量，是对的；这里统一用字面量避免转义歧义。
-    # [一-龥]{2,8} 是个贪心的"任意汉字"区间，会把前面的单字虚词一起吃进公司名。
-    # 典型触发：文本先经过本体占位符替换（"本项目"→"[本项目]"），此时 "由" 前面
-    # 不再是汉字，lookbehind 放行 → 匹配到 "由北京某某科技有限公司"。
-    # 且 lookbehind 里的排除集若做成变量长 lookbehind，正则引擎会对每个起点回溯
-    # 逐个试长度，代价高且行为难预测。稳妥做法：先以 [一-龥]{2,10} 匹配（多留余量），
-    # 匹配后再剥掉开头的虚词（见"公司名清洗"）。
-    (r"(?<![一-龥])[一-龥]{2,10}"
-     r"(?:有限公司|集团公司|股份有限公司|有限责任公司"
+    (r"(?<![\\u4e00-\\u9fff])[\\u4e00-\\u9fff]{2,8}(?:有限公司|集团公司|股份有限公司|有限责任公司"
      r"|研究院|研究所|设计院|设计研究院"
      r"|支行|分行|营业部|联社|总厂|分厂"
      r"|局|委员会|办公室|办公厅)", "org"),
     # 高校
     (r"(?<![一-龥])[一-龥]{2,8}(?:大学|学院|研究院|实验室|学校)", "school"),
-    # 文件系统路径（含 WSL/Windows 盘符形态，由 _path_res() 的 _DEFAULT_PATH_PATTERNS 覆盖）
-    ("(?:wsl|win|linux)_path", "path"),
+    # WSL 挂载路径
+    (r"/mnt/[a-z]/[a-zA-Z0-9_./\u4e00-\u9fff -]+", "wsl_path"),
+    # Windows 盘符路径
+    (r"(?<![a-zA-Z])[A-Za-z]:\\(?:[^\\s:\"'<>|?*\\]+\\?)+[^\\s:\"'<>|?*\\,;)]*", "win_path"),
     # 手机号
     (r"(?<!\d)1[3-9]\d{9}(?!\d)", "phone"),
     # 身份证号
@@ -330,19 +204,7 @@ PATTERNS: list[tuple[str, str]] = [
      r"|192\.168\.\d{1,3}\.\d{1,3}"
      r"|127\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", "ip"),
 ]
-_DEFAULT_PATH_PATTERNS = [
-    r"/home/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.\-/]+)?",
-    r"/Users/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.\-/]+)?",
-]
-
-
-def _path_res() -> list[re.Pattern]:
-    """路径脱敏正则。默认覆盖 Linux/macOS 家目录，可由配置 path_masking.patterns 覆盖。
-
-    返回列表（配置可给多条），用 re.search 逐个试。
-    """
-    pats = _PATH_PATTERNS or [re.compile(p) for p in _DEFAULT_PATH_PATTERNS]
-    return pats
+_LINUX_HOME_RE = re.compile(r"/home/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.\-/]+)?")
 
 # ── jieba 自定义词典（脱敏专用）──
 _JIEBA_DICT_PATH = os.path.join(os.path.dirname(__file__), 'jieba_dict.txt')
@@ -362,25 +224,10 @@ TYPE_TO_CN: dict[str, str] = {
     "email": "邮箱",
     "ip": "内网IP",
     "linux_path": "路径",
-    "path": "路径",
     "person": "人物",
     "org_jieba": "公司",
 }
 _CN_TYPES = set(TYPE_TO_CN.values()) | {"人物", "项目", "本公司", "本人", "本项目", "xxx数量级1", "xxx数量级2", "xxx数量级3"}
-
-# ── 重叠优先级 ──
-# 原插件把路径脱敏放在**独立一轮**（先路径、后通用模式），因此路径总是赢。
-# 合并进单轮匹配后必须显式表达这个次序，否则更长的匹配会被同起点的短匹配挤掉
-# （路径 4-32 输给 4-23，尾部残余变成裸文本）。
-_PATTERN_PRIORITY: dict[str, int] = {
-    "wsl_path": 100, "win_path": 100, "linux_path": 100, "paths": 100,
-    "email": 90, "idcard": 90, "phone": 90, "ip": 90,
-    "org": 50, "school": 50, "address": 50, "org_jieba": 50, "person": 60,
-}
-
-# 公司名正则的引导虚词：这些字若出现在匹配串开头，是从前面的句子成分里被
-# "任意汉字"区间误吃的，需剥掉（见 regex_desensitize 里的清洗逻辑）。
-_ORG_LEAD_STRIP = "由是为对向从与和及在"
 
 
 # ──────────────────────────────────────────────
@@ -403,7 +250,7 @@ def _apply_quantity_placeholders(text: str, mapping: dict, counter: list) -> str
     result = text
     offset = 0
     qty_n = 0
-    for m in _quantity_re().finditer(text):
+    for m in _QUANTITY_RE.finditer(text):
         matched = m.group()
         qty_n += 1
         ph = f"[xxx数量级{qty_n}]"
@@ -474,42 +321,22 @@ def regex_desensitize(text: str) -> tuple[str, dict]:
 
     for pattern, ptype in PATTERNS:
         for m in re.finditer(pattern, result):
-            text_m, start_m, end_m = m.group(), m.start(), m.end()
-            if ptype == "org":
-                # 剥掉被贪心区间吃进来的引导虚词（"由/是/为/对/向/从/与/和/及/在"）。
-                # 只剥开头，且保证剥完还剩 ≥2 个汉字，避免把公司名剥空。
-                while text_m and text_m[0] in _ORG_LEAD_STRIP and len(text_m) - 1 >= 2:
-                    text_m = text_m[1:]
-                    start_m += 1
-                if len(text_m) < 2:
-                    continue
-            all_matches.append((start_m, end_m, text_m, ptype))
+            all_matches.append((m.start(), m.end(), m.group(), ptype))
 
-    for _pre in _path_res():
-        for m in _pre.finditer(result):
-            # ptype 必须是 TYPE_TO_CN 里的键，否则占位符退化成 [敏感N]
-            # （原插件此处写作 "paths"，因不在表中而丢掉了 [路径N] 标签）
-            all_matches.append((m.start(), m.end(), m.group(), "path"))
+    for m in _LINUX_HOME_RE.finditer(result):
+        all_matches.append((m.start(), m.end(), m.group(), "linux_path"))
 
     if not all_matches:
         return result, mapping
 
-    # 排序 + 去重叠（同起点取最长；再按类型优先级打破交叉，路径优先于通用模式）
+    # 排序 + 去重叠
     all_matches.sort(key=lambda x: (x[0], -x[1]))
     deduped: list[tuple[int, int, str, str]] = []
-    for start, end, matched, ptype in all_matches:
-        # 与已接受区间重叠时：高优先级类型可取而代之（原插件里路径是独立一轮、优先级更高）
-        overlapped = None
-        for i, (s0, e0, _m0, pt0) in enumerate(deduped):
-            if start < e0 and end > s0:      # 真重叠（不共用端点）
-                overlapped = i
-                break
-        if overlapped is None:
-            deduped.append((start, end, matched, ptype))
-            continue
-        if _PATTERN_PRIORITY.get(ptype, 0) > _PATTERN_PRIORITY.get(deduped[overlapped][3], 0):
-            deduped[overlapped] = (start, end, matched, ptype)
-    deduped.sort(key=lambda x: x[0])
+    last_end = 0
+    for start, end, matched, _pt in all_matches:
+        if start >= last_end:
+            deduped.append((start, end, matched, _pt))
+            last_end = end
 
     for start, end, matched, ptype in reversed(deduped):
         # 跳过公开实体（华为/北斗等公共名称不脱敏）
@@ -640,18 +467,10 @@ def _parse_llm_response(content: str, elapsed: float, source: str,
     return rebuilt, mapping
 
 
-def _call_openai_compat(text: str, timeout: int) -> tuple[str, dict] | None:
-    """调用任何 OpenAI 兼容的 /chat/completions 端点。
-
-    base_url 优先读配置 llm.base_url，其次 OPENAI_BASE_URL，最后回退 SiliconFlow。
-    key 从 llm.api_key_env 指定的环境变量读取（不落盘）。
-    """
-    base = str(_cfg.get("llm.base_url", "") or os.environ.get("OPENAI_BASE_URL", "")
-               or _SILICONFLOW_BASE).rstrip("/")
-    key = _api_key()
-    if not key:
-        env_name = str(_cfg.get("llm.api_key_env", "OPENAI_API_KEY"))
-        log.warning("desensitize: 环境变量 %s 未设置，无法调用 %s", env_name, base)
+def _call_siliconflow(text: str, timeout: int) -> tuple[str, dict] | None:
+    """调用 SiliconFlow API 做一段文本的 LLM 脱敏"""
+    if not _SILICONFLOW_API_KEY:
+        log.warning("SiliconFlow API Key 未配置，回退正则")
         return None
 
     prompt = _PROMPT_TEMPLATE + text
@@ -664,11 +483,11 @@ def _call_openai_compat(text: str, timeout: int) -> tuple[str, dict] | None:
     }).encode()
 
     req = urllib.request.Request(
-        f"{base}/chat/completions",
+        f"{_SILICONFLOW_BASE}/chat/completions",
         data=data,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
+            "Authorization": f"Bearer {_SILICONFLOW_API_KEY}",
         },
     )
 
@@ -741,13 +560,9 @@ def _call_ollama(text: str, timeout: int) -> tuple[str, dict] | None:
 
 
 def _call_llm(text: str, timeout: int) -> tuple[str, dict] | None:
-    """按 _LLM_PROVIDER 调用对应后端。
-
-    "openai" = 任何 OpenAI 兼容端点（SiliconFlow / vLLM / LM Studio / DeepSeek ...）。
-    "siliconflow" 是 v5 的旧名，保留兼容。
-    """
-    if _LLM_PROVIDER in ("openai", "siliconflow"):
-        return _call_openai_compat(text, timeout)
+    """根据 _LLM_PROVIDER 调用对应 LLM"""
+    if _LLM_PROVIDER == "siliconflow":
+        return _call_siliconflow(text, timeout)
     return _call_ollama(text, timeout)
 
 
@@ -887,9 +702,9 @@ def _looks_already_desensitized(content: str) -> bool:
     for pattern, _ptype in PATTERNS:
         if re.search(pattern, content):
             return False
-    if any(_pre.search(content) for _pre in _path_res()):
+    if _LINUX_HOME_RE.search(content):
         return False
-    if _SELF_RE.search(content) or _quantity_re().search(content):
+    if _SELF_RE.search(content) or _QUANTITY_RE.search(content):
         return False
     # 手机号/身份证/邮箱等数字敏感项由 PATTERNS 覆盖；这里兜底常见数字形态
     if re.search(r"(?<!\d)\d{6,}(?!\d)", content):
@@ -1021,14 +836,8 @@ def _pre_api_request(**kwargs: Any) -> None:
 # ──────────────────────────────────────────────
 
 def _handle_desensitize(raw: str) -> Optional[str]:
-    """处理 /desensitize on|off|status|model|timeout|chunk
-
-    文字按 ui.language 输出（both / en / zh），见 :func:`L`。命令反馈是插件唯一对
-    非中文使用者可见的界面；改动前一律只给中文，英文用户读到的是不可读的路径
-    （review #122574 提出）。
-    """
+    """处理 /desensitize on|off|status|model|timeout|chunk"""
     global _enabled, _LLM_PROVIDER, _LLM_MODEL, _LLM_TIMEOUT, _CHUNK_MAX_CHARS, _OLLAMA_BASE
-    global _UI_LANG, _HELP_LANG_EXPLICIT
 
     args = raw.strip().split()
     if not args:
@@ -1039,13 +848,13 @@ def _handle_desensitize(raw: str) -> Optional[str]:
     if cmd == "on":
         _enabled = False  # 保持关闭——需要 config.yaml 和重启才能启用
         return (
-            f"{L('Desensitization enabled', '脱敏已启用')}\n"
-            f"  {L('Provider', '提供方')}: {_LLM_PROVIDER}\n"
-            f"  {L('Engine', '主引擎')}:   {_LLM_MODEL} ({L('timeout', '超时')} {_LLM_TIMEOUT}s)\n"
-            f"  {L('Chunk', '分段')}:      ≤{_CHUNK_MAX_CHARS} {L('chars', '字')}\n"
-            f"  {L('Fallback', '回退')}:   {L('regex rules', '正则规则')} ({len(PATTERNS)} {L('kinds', '类')}, <1ms)\n"
-            f"  {L('Self', '本体')}:       {L('this-company/self/this-project → fixed placeholder', '本公司/本人/本项目 → 固定占位符')}\n"
-            f"  {L('Magnitude', '数量级')}: {L('output/market figures → [xxx数量级]', '产值/市场等数据 → [xxx数量级]')}"
+            f"脱敏已启用\n"
+            f"  提供方: {_LLM_PROVIDER}\n"
+            f"  主引擎: {_LLM_MODEL}（超时 {_LLM_TIMEOUT}s）\n"
+            f"  分段:   每段 ≤{_CHUNK_MAX_CHARS} 字\n"
+            f"  回退:   正规则则（{len(PATTERNS)} 类, <1ms）\n"
+            f"  本体:   本公司/本人/本项目 → 固定占位符\n"
+            f"  数量级: 产值/市场等数据 → [xxx数量级]"
         )
 
     elif cmd == "off":
@@ -1053,153 +862,85 @@ def _handle_desensitize(raw: str) -> Optional[str]:
         _mappings.clear()
         _desensitize_cache.clear()
         _restore_index.clear()
-        return L("Desensitization disabled — original text goes to the model unredacted",
-                 "脱敏已关闭，消息原文直发云端")
+        return "脱敏已关闭，消息原文直发云端"
 
     elif cmd == "model":
         if len(args) < 2:
             return (
-                f"{L('Current provider', '当前提供方')}: {_LLM_PROVIDER}\n"
-                f"{L('Current model', '当前模型')}: {_LLM_MODEL}\n"
-                f"{L('Usage', '用法')}:\n"
-                f"  /desensitize model <name>          {L('switch model', '切换模型')}\n"
-                f"  /desensitize model ollama:<name>   {L('switch to local Ollama', '切换到 Ollama（本地）')}\n"
-                f"  /desensitize model openai:<name>   {L('switch to an OpenAI-compatible endpoint', '切换到 OpenAI 兼容端点')}\n"
-                f"                                     {L('(base_url: config llm.base_url, else OPENAI_BASE_URL)', '（base_url 读配置 llm.base_url 或 OPENAI_BASE_URL）')}"
+                f"当前提供方: {_LLM_PROVIDER}\n"
+                f"当前模型: {_LLM_MODEL}\n"
+                f"用法:\n"
+                f"  /desensitize model <模型名>            切换模型\n"
+                f"  /desensitize model ollama:<模型名>    切换到 Ollama\n"
+                f"  /desensitize model siliconflow:<模型名>  切换到 SiliconFlow"
             )
         val = args[1]
         if val.startswith("ollama:"):
             _LLM_PROVIDER = "ollama"
             _LLM_MODEL = val[7:]
-            return L(f"Switched to Ollama, model: {_LLM_MODEL}",
-                     f"已切换到 Ollama，模型: {_LLM_MODEL}")
-        elif val.startswith("openai:") or val.startswith("siliconflow:"):
-            _LLM_PROVIDER = "openai"
-            _LLM_MODEL = val.split(":", 1)[1]
-            return L(f"Switched to OpenAI-compatible endpoint, model: {_LLM_MODEL}",
-                     f"已切换到 OpenAI 兼容端点，模型: {_LLM_MODEL}")
+            return f"已切换到 Ollama，模型: {_LLM_MODEL}"
+        elif val.startswith("siliconflow:"):
+            _LLM_PROVIDER = "siliconflow"
+            _LLM_MODEL = val[12:]
+            return f"已切换到 SiliconFlow，模型: {_LLM_MODEL}"
         _LLM_MODEL = val
-        return L(f"LLM model set to {_LLM_MODEL}", f"LLM 模型已切换为 {_LLM_MODEL}")
+        return f"LLM 模型已切换为 {_LLM_MODEL}"
 
     elif cmd == "timeout":
         if len(args) < 2:
-            return (f"{L('Current timeout', '当前超时')}: {_LLM_TIMEOUT}s "
-                    f"{L('(per chunk)', '（每段独立计时）')}\n"
-                    f"{L('Usage', '用法')}: /desensitize timeout <{L('seconds', '秒数')}>")
+            return f"当前超时: {_LLM_TIMEOUT}s（每段独立计时）\n用法: /desensitize timeout <秒数>"
         try:
             val = int(args[1])
             if val < 5:
-                return L("Timeout must be at least 5s", "超时最少 5s")
+                return "超时最少 5s"
             _LLM_TIMEOUT = val
-            return L(f"LLM timeout set to {_LLM_TIMEOUT}s (split across chunks)",
-                     f"LLM 超时已设为 {_LLM_TIMEOUT}s（多段时每段均分）")
+            return f"LLM 超时已设为 {_LLM_TIMEOUT}s（多段时每段均分）"
         except ValueError:
-            return L("Invalid value — enter an integer number of seconds",
-                     "无效值，请输入整数秒")
+            return "无效值，请输入整数秒"
 
     elif cmd == "chunk":
         if len(args) < 2:
-            return (f"{L('Current chunk size', '当前分段')}: {_CHUNK_MAX_CHARS} {L('chars', '字')}\n"
-                    f"{L('Usage', '用法')}: /desensitize chunk <{L('characters', '字符数')}>")
+            return f"当前分段: {_CHUNK_MAX_CHARS} 字\n用法: /desensitize chunk <字符数>"
         try:
             val = int(args[1])
             if val < 500:
-                return L("Chunk size must be at least 500", "分段最少 500 字")
+                return "分段最少 500 字"
             _CHUNK_MAX_CHARS = val
-            return L(f"Chunk size set to {_CHUNK_MAX_CHARS} chars",
-                     f"分段大小已设为 {_CHUNK_MAX_CHARS} 字")
+            return f"分段大小已设为 {_CHUNK_MAX_CHARS} 字"
         except ValueError:
-            return L("Invalid value — enter an integer", "无效值，请输入整数")
+            return "无效值，请输入整数"
 
     elif cmd in ("status", ""):
-        status = L("enabled", "已启用") if _enabled else L("disabled", "已关闭")
+        status = "已启用" if _enabled else "已关闭"
         count = sum(len(m) for m in _mappings.values())
-        # 报告真实端点而非硬编码标签：配了 llm.base_url（或 OPENAI_BASE_URL）时
-        # 走的是自定义端点，旧代码一律显示 api.siliconflow.cn，会掩盖原文实际
-        # 发往哪里 —— 对隐私工具这是必须准确的字段。
-        if _LLM_PROVIDER == "ollama":
-            provider_info = _OLLAMA_BASE or "N/A"
-        else:
-            provider_info = str(
-                _cfg.get("llm.base_url", "") or os.environ.get("OPENAI_BASE_URL", "")
-                or _SILICONFLOW_BASE).rstrip("/")
-        egress = (L("local", "本地") if _LLM_PROVIDER == "ollama"
-                  else L("REMOTE — text is sent here BEFORE redaction",
-                         "云端 — 原文未脱敏前发往此端点"))
+        provider_info = _OLLAMA_BASE or "N/A" if _LLM_PROVIDER == "ollama" else "api.siliconflow.cn"
         return (
-            f"{L('Status', '脱敏状态')}: {status}\n"
-            f"  Provider: {_LLM_PROVIDER}\n"
-            f"  {L('Engine', '主引擎')}:   {_LLM_MODEL} ({L('timeout', '超时')} {_LLM_TIMEOUT}s)\n"
-            f"  Endpoint: {provider_info}\n"
-            f"  {L('Egress', '出网')}:     {egress}\n"
-            f"  {L('Chunk', '分段')}:      ≤{_CHUNK_MAX_CHARS} {L('chars', '字')}\n"
-            f"  {L('Fallback', '回退')}:   {L('regex rules', '正则规则')} ({len(PATTERNS)} {L('kinds', '类')})\n"
-            f"  {L('Self', '本体')}:       {L('this-company/self/this-project → fixed placeholder', '本公司/本人/本项目 → 固定占位符')}\n"
-            f"  {L('Magnitude', '数量级')}: {L('output/market figures → [xxx数量级]', '产值/市场等数据 → [xxx数量级]')}\n"
-            f"  {L('Skipped', '不处理')}:  {L('papers/patents/site names/tech parameters', '论文/专利/站名/技术参数')}\n"
-            f"  {L('Architecture', '架构')}: {L('pre_llm_call in-place substitution', 'pre_llm_call 原位替换')}\n"
-            f"                       {L('+ transform_llm_output restore', '+ transform_llm_output 还原')}\n"
-            f"                       {L('+ post_llm_call session restore (keeps the DB original)', '+ post_llm_call 恢复会话（确保 DB 存原文）')}\n"
-            f"  {L('Mappings', '当前映射')}: {count} {L('items', '项')}"
+            f"脱敏状态: {status}\n"
+            f"  提供方: {_LLM_PROVIDER}\n"
+            f"  主引擎: {_LLM_MODEL}（超时 {_LLM_TIMEOUT}s）\n"
+            f"  端点:   {provider_info}\n"
+            f"  分段:   每段 ≤{_CHUNK_MAX_CHARS} 字\n"
+            f"  回退:   正规则则（{len(PATTERNS)} 类）\n"
+            f"  本体:   本公司/本人/本项目 → 固定占位符\n"
+            f"  数量级: 产值/市场等数据 → [xxx数量级]\n"
+            f"  不处理: 论文/专利/站名/技术参数\n"
+            f"  架构:   pre_llm_call 原位替换\n"
+            f"          + transform_llm_output 还原\n"
+            f"          + post_llm_call 恢复会话（确保 DB 存原文）\n"
+            f"  当前映射: {count} 项"
         )
 
-    elif cmd == "lang":
-        # 会话内切换输出语言。不落盘——要持久化请改 ui.language（配置文件或
-        # DESENSITIZE_UI__LANGUAGE）。语言是会话级偏好，落盘会在用户换终端/
-        # 换语言环境时变成意外残留。
-        if len(args) < 2:
-            return (
-                f"{L('Current language', '当前语言')}: {_UI_LANG}\n"
-                f"{L('Usage', '用法')}: /desensitize lang <both|en|zh>\n"
-                f"  both — {L('English + Chinese, English first', '英中双语，英文在前')}\n"
-                f"  en   — {L('English only', '纯英文')}\n"
-                f"  zh   — {L('Chinese only', '纯中文')}\n"
-                f"{L('Aliases accepted: cn / chinese → zh, english → en. Help follows this choice too. Effective for this run only (restart Hermes to reset); to persist, set ui.language in config or DESENSITIZE_UI__LANGUAGE.', '也接受别名：cn / chinese → zh，english → en。help 也跟随该选择。仅本次运行有效（重启 Hermes 后失效）；要持久化请改 ui.language 配置或 DESENSITIZE_UI__LANGUAGE。')}"
-            )
-        raw_lang = args[1].strip().lower()
-        new_lang = _LANG_ALIASES.get(raw_lang, raw_lang)
-        if new_lang not in ("both", "en", "zh"):
-            # 保持原值而不是回落 both：原本是 zh 的用户打错一次不该被降级。
-            return L(f"Unrecognized language {raw_lang!r} — expected both/en/zh. Kept: {_UI_LANG}",
-                     f"无法识别的语言 {raw_lang!r}，可选 both/en/zh。已保持: {_UI_LANG}")
-        _UI_LANG = new_lang
-        _HELP_LANG_EXPLICIT = True
-        return L(f"Output language set to '{_UI_LANG}' (this run)",
-                 f"输出语言已设为 '{_UI_LANG}'（本次运行有效）")
-
     else:
-        # help 面向的是「不知道怎么用」的人——第一次用、语言还没配。所以这里用
-        # help_language（默认 en）而不是 ui.language：一个读不了中文的人，打开
-        # 帮助时最需要的就是看得懂。会话内可用 /desensitize lang 立刻覆盖。
-        #
-        # 但未知子命令必须先显式报错再给 help：`leng cn`（`lang` 的笔误）静默
-        # 回落到一屏英文用法，用户根本不知道自己打错了（实测投诉「没生效」）。
-        # 报错文字走 L()（会话语言），因为此时用户已经会用命令了，缺的只是回执。
-        known = ("on", "off", "status", "lang", "model", "timeout", "chunk", "help", "?")
-        notice = ""
-        if cmd not in known:
-            close = difflib.get_close_matches(cmd, known, n=1)
-            notice = L(
-                f"Unknown subcommand {cmd!r}" + (f" — did you mean '{close[0]}'?" if close else ""),
-                f"未知子命令 {cmd!r}" + (f"，是不是想输 '{close[0]}'？" if close else ""),
-            ) + "\n\n"
         return (
-            notice
-            + f"{_HELP_L('Usage', '用法')}:\n"
-            f"  /desensitize on                            {_HELP_L('enable', '启用脱敏')}\n"
-            f"  /desensitize off                           {_HELP_L('disable (original text goes to the model)', '关闭脱敏')}\n"
-            f"  /desensitize status                        {_HELP_L('show status, including egress endpoint', '查看状态')}\n"
-            f"  /desensitize lang <both|en|zh>             {_HELP_L('set output language for this session', '设置本次会话的输出语言')}\n"
-            f"  /desensitize model <name>                  {_HELP_L('switch model', '切换模型')}\n"
-            f"  /desensitize model ollama:<name>           {_HELP_L('switch to local Ollama', '切到 Ollama（本地）')}\n"
-            f"  /desensitize model openai:<name>           {_HELP_L('switch to an OpenAI-compatible endpoint', '切到 OpenAI 兼容端点')}\n"
-            f"  /desensitize model siliconflow:<name>      {_HELP_L('switch to SiliconFlow', '切到 SiliconFlow')}\n"
-            f"  /desensitize timeout <seconds>             {_HELP_L('set LLM timeout', '设置 LLM 超时')}\n"
-            f"  /desensitize chunk <characters>            {_HELP_L('set chunk size', '设置分段大小')}\n"
-            f"\n"
-            f"{_HELP_L('Output language is ui.language (both|en|zh, default both); /desensitize lang overrides it for this run. This help starts in help_language (default en) so it stays readable before the language is set; once you pick a language with /desensitize lang, this help follows it too.', '输出语言由 ui.language 控制（both|en|zh，默认 both）；/desensitize lang 可覆盖（本次运行有效）。本帮助初始用 help_language（默认 en）渲染，保证语言尚未设置时也读得懂；一旦用 /desensitize lang 选过语言，help 也跟随该选择。')}\n"
-            f"\n"
-            f"{_HELP_L('When an OpenAI-compatible endpoint is used, base_url comes from config llm.base_url or OPENAI_BASE_URL; it falls back to api.siliconflow.cn when neither is set.', '使用 OpenAI 兼容端点时，base_url 读配置 llm.base_url 或 OPENAI_BASE_URL；两者都未设置时回退到 api.siliconflow.cn。')}"
+            "用法:\n"
+            "  /desensitize on                            启用脱敏\n"
+            "  /desensitize off                           关闭脱敏\n"
+            "  /desensitize status                        查看状态\n"
+            "  /desensitize model <模型名>                 切换模型\n"
+            "  /desensitize model ollama:<模型名>         切到 Ollama\n"
+            "  /desensitize model siliconflow:<模型名>    切到 SiliconFlow\n"
+            "  /desensitize timeout <秒数>                 设置 LLM 超时\n"
+            "  /desensitize chunk <字数>                   设置分段大小"
         )
 
 
@@ -1208,12 +949,6 @@ def _handle_desensitize(raw: str) -> Optional[str]:
 # ──────────────────────────────────────────────
 
 def register(ctx):
-    # 先把配置层的值同步到模块级变量（三层覆盖 → 运行时变量）
-    try:
-        _sync_from_config()
-    except Exception as e:
-        log.warning("desensitize: 配置加载失败（%s），使用内置默认值", e)
-
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("pre_api_request", _pre_api_request)
     ctx.register_hook("transform_llm_output", _transform_llm_output)
@@ -1222,8 +957,8 @@ def register(ctx):
     ctx.register_command(
         name="desensitize",
         handler=_handle_desensitize,
-        description="Manage Chinese-context desensitization (LLM semantic layer + regex fallback)",
-        args_hint="on|off|status|lang|model|timeout|chunk",
+        description="脱敏管理 (LLM主脱敏 + 正则回退 + 自动分段)",
+        args_hint="on|off|status|model|timeout|chunk",
     )
 
     log.info(

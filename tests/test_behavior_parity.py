@@ -14,7 +14,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-ORIG = Path.home() / ".hermes" / "plugins" / "desensitize" / "__init__.py"
+ORIG = Path(__file__).parent / "fixtures" / "original_desensitize_20260817.py"
+# 原先指向 ~/.hermes/plugins/desensitize/__init__.py。2026-09-25 该目录重装为包布局后，
+# 那个 __init__.py 是包根（`from .plugin import ...`），以顶层模块名 exec 必然
+# ModuleNotFoundError: No module named 'orig_desens' —— 测试从此一直红，且红的原因
+# 与被测行为无关。原始版（8月17日单文件，39KB）已归档为本目录夹具，自包含、可复现，
+# 不再依赖用户机器上的安装状态。
 
 CASES = [
     "联系电话13812345678",
