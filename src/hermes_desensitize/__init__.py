@@ -8,6 +8,7 @@ Hermes 的插件加载器要求**包根**暴露 :func:`register`，而实现体�
 from .plugin import (  # noqa: F401
     PATTERNS,
     TYPE_TO_CN,
+    L,
     _handle_desensitize,
     _path_res,
     _sync_from_config,
@@ -20,6 +21,7 @@ __all__ = [
     "regex_desensitize",
     "PATTERNS",
     "TYPE_TO_CN",
+    "L",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

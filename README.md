@@ -85,7 +85,24 @@ llm:
   provider: ollama
   model: qwen3:8b      # 换更强的模型能提高语义层召回
   timeout: 10
+
+ui:
+  # 命令输出语言：both（默认，英中双语）/ en（纯英文）/ zh（纯中文）
+  # 只影响 /desensitize 的文字，不影响脱敏行为。未知值回落 both。
+  language: both
 ```
+
+`ui.language` 也可以用环境变量设：`DESENSITIZE_UI__LANGUAGE=en`。
+
+命令反馈是这个插件唯一对非中文使用者可见的界面，所以三种取值都给：
+
+| 取值 | `status` 首行 |
+|---|---|
+| `both`（默认） | `Status / 脱敏状态: ...` |
+| `en` | `Status: ...` |
+| `zh` | `脱敏状态: ...` |
+
+默认 `both` 而不是纯英文，是因为双语不丢任何读者（改动前只有中文）。**注意 `[xxx数量级N]` 这类占位符是脱敏时真正写入文本的值，任何语言下都保持原样**——否则还原会失配。
 
 用 OpenAI 兼容端点（SiliconFlow / vLLM / LM Studio）：
 
