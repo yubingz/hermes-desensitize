@@ -90,9 +90,12 @@ ui:
   # 命令输出语言：both（默认，英中双语）/ en（纯英文）/ zh（纯中文）
   # 只影响 /desensitize 的文字，不影响脱敏行为。未知值回落 both。
   language: both
+  # help（未知子命令的输出）的语言，默认 en。与 language 分开：help 面向第一次
+  # 使用、还没配语言的人，用英文保证读不了中文的人也看得懂。
+  help_language: en
 ```
 
-`ui.language` 也可以用环境变量设：`DESENSITIZE_UI__LANGUAGE=en`。
+`ui.language` 也可以用环境变量设：`DESENSITIZE_UI__LANGUAGE=en`（`help_language` 同理：`DESENSITIZE_UI__HELP_LANGUAGE`）。
 
 命令反馈是这个插件唯一对非中文使用者可见的界面，所以三种取值都给：
 
@@ -102,7 +105,11 @@ ui:
 | `en` | `Status: ...` |
 | `zh` | `脱敏状态: ...` |
 
-默认 `both` 而不是纯英文，是因为双语不丢任何读者（改动前只有中文）。**注意 `[xxx数量级N]` 这类占位符是脱敏时真正写入文本的值，任何语言下都保持原样**——否则还原会失配。
+默认 `both` 而不是纯英文，是因为双语不丢任何读者（改动前只有中文）。**会话内可用 `/desensitize lang en|zh|both` 临时切换**（不落盘，重启即失效）。
+
+**help 单独用 `help_language`（默认 `en`）**：第一次用的人如果读不了中文，打开帮助时最需要的就是看得懂 —— 所以 help 默认英文，且不受 `ui.language=zh` 影响。
+
+**注意 `[xxx数量级N]` 这类占位符是脱敏时真正写入文本的值，任何语言下都保持原样**——否则还原会失配。
 
 用 OpenAI 兼容端点（SiliconFlow / vLLM / LM Studio）：
 

@@ -129,3 +129,6 @@ behavior:
 # 只影响命令文字，不影响脱敏行为本身。
 ui:
   language: both
+  # help 输出语言（on/off/status 之外的未知子命令）。默认 en：help 面向第一次
+  # 使用、语言还没配的人，用英文保证读不了中文的人也看得懂。可选 en/zh/both。
+  help_language: en

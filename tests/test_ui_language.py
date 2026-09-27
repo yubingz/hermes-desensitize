@@ -64,18 +64,63 @@ check("status 英文标签", "Status: " in status, True)
 check("status 保留占位符原文", "[xxx数量级]" in status, True)
 usage = P._handle_desensitize("bogus")
 check("usage 无中文", has_cjk(usage), False)
-check("usage 含英文", "Usage:" in usage, True)
+check("usage 含英文", "Usage" in usage, True)
 check("错误串无中文", has_cjk(P._handle_desensitize("timeout 3")), False)
 check("chunk 错误无中文", has_cjk(P._handle_desensitize("chunk 1")), False)
 
 print()
 print("── ui.language = zh（纯中文，最干净）──")
 P._UI_LANG = "zh"
+P._HELP_LANG = "en"  # help 有独立的 help_language，见下方专块
 check("L() 只取中文", P.L("Engine", "主引擎"), "主引擎")
 out = P._handle_desensitize("off")
 check("off 无英文", "Desensitization" not in out, True)
 check("off 保留中文", "脱敏已关闭" in out, True)
-check("usage 无英文标签", "Usage:" not in P._handle_desensitize("bogus"), True)
+check("status 标签纯中文", has_cjk(P._handle_desensitize("status")), True)
+# 注意：不在此断言 help 的语言 —— help 由 help_language 控制（默认 en），
+# 与 ui.language 无关。help 的断言在下面 "help 默认英文" 专块。
+
+print()
+print("── /desensitize lang 会话内切换 ──")
+P._sync_from_config()
+P._UI_LANG = "both"
+check("lang 无参数显示当前值", "both" in P._handle_desensitize("lang"), True)
+P._handle_desensitize("lang en")
+check("lang en 生效", P._UI_LANG, "en")
+check("lang en 后 off 无中文", has_cjk(P._handle_desensitize("off")), False)
+P._handle_desensitize("lang zh")
+check("lang zh 生效", P._UI_LANG, "zh")
+check("lang zh 后 off 无英文", "Desensitization" not in P._handle_desensitize("off"), True)
+P._handle_desensitize("lang both")
+check("lang both 生效", P._UI_LANG, "both")
+P._handle_desensitize("lang EN")  # 大小写不敏感
+check("lang 大小写不敏感", P._UI_LANG, "en")
+P._handle_desensitize("lang fr")
+check("lang 非法值回落 both", P._UI_LANG, "both")
+
+print()
+print("── help 默认英文（help_language）──")
+P._sync_from_config()
+check("默认 help_language=en", P._HELP_LANG, "en")
+help_out = P._handle_desensitize("bogus")
+check("默认 help 无中文", has_cjk(help_out), False)
+check("默认 help 首行 Usage:", help_out.split("\n")[0], "Usage:")
+check("help 含 lang 子命令", "/desensitize lang" in help_out, True)
+
+# 关键：用户把界面设成纯中文时，help 仍应英文（help 面向还没配语言的人）
+P._UI_LANG = "zh"
+P._HELP_LANG = "en"
+check("zh 界面下 off 纯中文", "Desensitization" not in P._handle_desensitize("off"), True)
+check("zh 界面下 help 仍无中文", has_cjk(P._handle_desensitize("bogus")), False)
+
+# help_language 可配
+P._HELP_LANG = "both"
+check("help_language=both 有中文", has_cjk(P._handle_desensitize("bogus")), True)
+check("help_language=both 有英文", "Usage" in P._handle_desensitize("bogus"), True)
+P._HELP_LANG = "zh"
+help_zh = P._handle_desensitize("bogus")
+check("help_language=zh 是中文", "用法:" in help_zh, True)
+check("help_language=zh 无英文标签", "Usage" not in help_zh, True)
 
 print()
 print("── 空串处理（L 的边界）──")
@@ -114,6 +159,24 @@ env.pop("DESENSITIZE_UI__LANGUAGE", None)
 got = subprocess.run([sys.executable, "-c", probe.format(pkg=str(PKG))],
                      env=env, capture_output=True, text=True).stdout.strip()
 check("配置文件 ui.language=en", got, repr("en"))
+
+# help_language 也走配置层
+probe_help = (
+    "import sys; sys.path.insert(0, {pkg!r});"
+    "import hermes_desensitize.plugin as P; P._sync_from_config();"
+    "print(repr(P._HELP_LANG))"
+)
+env = dict(os.environ, DESENSITIZE_UI__HELP_LANGUAGE="zh")
+env.pop("DESENSITIZE_UI__LANGUAGE", None)
+got = subprocess.run([sys.executable, "-c", probe_help.format(pkg=str(PKG))],
+                     env=env, capture_output=True, text=True).stdout.strip()
+check("env ui.help_language=zh", got, repr("zh"))
+
+env = dict(os.environ, DESENSITIZE_UI__HELP_LANGUAGE="nonsense")
+env.pop("DESENSITIZE_UI__LANGUAGE", None)
+got = subprocess.run([sys.executable, "-c", probe_help.format(pkg=str(PKG))],
+                     env=env, capture_output=True, text=True).stdout.strip()
+check("未知 help_language 回落 en", got, repr("en"))
 
 print()
 if failures:

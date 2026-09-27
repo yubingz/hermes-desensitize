@@ -38,6 +38,9 @@ _enabled = True
 # 命令输出语言：both（英中双语，默认）/ en（纯英文）/ zh（纯中文）。
 # 只影响 /desensitize 的文字，不影响脱敏行为。
 _UI_LANG = "both"
+# help 输出的语言。与 ui.language 分开：help 面向「还不知道怎么用」的人（第一次
+# 用、语言还没配），默认 en 保证读不了中文的人打开帮助时看得懂。可选 en/zh/both。
+_HELP_LANG = "en"
 
 
 def L(en: str, zh: str) -> str:
@@ -47,25 +50,42 @@ def L(en: str, zh: str) -> str:
     命令反馈是这个插件唯一对非中文使用者可见的界面，所以必须可选纯英文；
     双语作为默认，是因为它不丢任何读者（改动前只有中文）。
     """
-    if _UI_LANG == "en":
+    return _pick(_UI_LANG, en, zh)
+
+
+def _HELP_L(en: str, zh: str) -> str:
+    """按 help_language 选择 help 文字（默认 en，见 _HELP_LANG）。"""
+    return _pick(_HELP_LANG, en, zh)
+
+
+def _pick(lang: str, en: str, zh: str) -> str:
+    """三态取值。无法识别时按 both 渲染（调用方应先用 _norm_lang 校验）。"""
+    if lang == "en":
         return en
-    if _UI_LANG == "zh":
+    if lang == "zh":
         return zh
     return f"{en} / {zh}" if en and zh else (en or zh)
+
+
+def _norm_lang(value: Any, default: str) -> str:
+    """校验语言取值；无法识别时告警并回落。"""
+    lang = str(value or default).strip().lower()
+    if lang not in ("both", "en", "zh"):
+        log.warning("desensitize: 语言值 %r 无法识别，回退 %s（可选 en/zh/both）", lang, default)
+        return default
+    return lang
 
 
 def _sync_from_config() -> None:
     """把配置层的值同步到模块级变量。register() 时调用一次。"""
     global _LLM_PROVIDER, _LLM_MODEL, _LLM_TIMEOUT, _CHUNK_MAX_CHARS
     global _SELF_PATTERNS, _PUBLIC_ENTITIES, _QUANTITY_KEYWORDS, _PATH_PATTERNS
-    global _REGEX_FALLBACK, _UI_LANG
+    global _REGEX_FALLBACK, _UI_LANG, _HELP_LANG
 
     _enabled = bool(_cfg.get("behavior.enabled_by_default", True))
     _REGEX_FALLBACK = bool(_cfg.get("behavior.regex_fallback", True))
-    _UI_LANG = str(_cfg.get("ui.language", "both") or "both").strip().lower()
-    if _UI_LANG not in ("both", "en", "zh"):
-        log.warning("desensitize: ui.language=%r 无法识别，回退 both（可选 en/zh/both）", _UI_LANG)
-        _UI_LANG = "both"
+    _UI_LANG = _norm_lang(_cfg.get("ui.language", "both"), "both")
+    _HELP_LANG = _norm_lang(_cfg.get("ui.help_language", "en"), "en")
     _LLM_PROVIDER = str(_cfg.get("llm.provider", "ollama"))
     _LLM_MODEL = str(_cfg.get("llm.model", "qwen3:8b"))
     _LLM_TIMEOUT = int(_cfg.get("llm.timeout", 10))
@@ -990,6 +1010,7 @@ def _handle_desensitize(raw: str) -> Optional[str]:
     （review #122574 提出）。
     """
     global _enabled, _LLM_PROVIDER, _LLM_MODEL, _LLM_TIMEOUT, _CHUNK_MAX_CHARS, _OLLAMA_BASE
+    global _UI_LANG
 
     args = raw.strip().split()
     if not args:
@@ -1104,20 +1125,48 @@ def _handle_desensitize(raw: str) -> Optional[str]:
             f"  {L('Mappings', '当前映射')}: {count} {L('items', '项')}"
         )
 
+    elif cmd == "lang":
+        # 会话内切换输出语言。不落盘——要持久化请改 ui.language（配置文件或
+        # DESENSITIZE_UI__LANGUAGE）。语言是会话级偏好，落盘会在用户换终端/
+        # 换语言环境时变成意外残留。
+        if len(args) < 2:
+            return (
+                f"{L('Current language', '当前语言')}: {_UI_LANG}\n"
+                f"{L('Usage', '用法')}: /desensitize lang <both|en|zh>\n"
+                f"  both — {L('English + Chinese, English first', '英中双语，英文在前')}\n"
+                f"  en   — {L('English only', '纯英文')}\n"
+                f"  zh   — {L('Chinese only', '纯中文')}\n"
+                f"{L('Session-only. To persist, set ui.language in config or DESENSITIZE_UI__LANGUAGE.', '仅本次会话生效。要持久化请改 ui.language 配置或 DESENSITIZE_UI__LANGUAGE。')}"
+            )
+        _UI_LANG = args[1].strip().lower()
+        if _UI_LANG not in ("both", "en", "zh"):
+            bad = _UI_LANG
+            _UI_LANG = "both"
+            return L(f"Unrecognized language {bad!r} — expected both/en/zh. Kept: both",
+                     f"无法识别的语言 {bad!r}，可选 both/en/zh。已保持: both")
+        return L(f"Output language set to '{_UI_LANG}' (this session)",
+                 f"输出语言已设为 '{_UI_LANG}'（仅本次会话）")
+
     else:
+        # help 面向的是「不知道怎么用」的人——第一次用、语言还没配。所以这里用
+        # help_language（默认 en）而不是 ui.language：一个读不了中文的人，打开
+        # 帮助时最需要的就是看得懂。会话内可用 /desensitize lang 立刻覆盖。
         return (
-            f"{L('Usage', '用法')}:\n"
-            f"  /desensitize on                            {L('enable', '启用脱敏')}\n"
-            f"  /desensitize off                           {L('disable (original text goes to the model)', '关闭脱敏')}\n"
-            f"  /desensitize status                        {L('show status, including egress endpoint', '查看状态')}\n"
-            f"  /desensitize model <name>                  {L('switch model', '切换模型')}\n"
-            f"  /desensitize model ollama:<name>           {L('switch to local Ollama', '切到 Ollama（本地）')}\n"
-            f"  /desensitize model openai:<name>           {L('switch to an OpenAI-compatible endpoint', '切到 OpenAI 兼容端点')}\n"
-            f"  /desensitize model siliconflow:<name>      {L('switch to SiliconFlow', '切到 SiliconFlow')}\n"
-            f"  /desensitize timeout <seconds>             {L('set LLM timeout', '设置 LLM 超时')}\n"
-            f"  /desensitize chunk <characters>            {L('set chunk size', '设置分段大小')}\n"
+            f"{_HELP_L('Usage', '用法')}:\n"
+            f"  /desensitize on                            {_HELP_L('enable', '启用脱敏')}\n"
+            f"  /desensitize off                           {_HELP_L('disable (original text goes to the model)', '关闭脱敏')}\n"
+            f"  /desensitize status                        {_HELP_L('show status, including egress endpoint', '查看状态')}\n"
+            f"  /desensitize lang <both|en|zh>             {_HELP_L('set output language for this session', '设置本次会话的输出语言')}\n"
+            f"  /desensitize model <name>                  {_HELP_L('switch model', '切换模型')}\n"
+            f"  /desensitize model ollama:<name>           {_HELP_L('switch to local Ollama', '切到 Ollama（本地）')}\n"
+            f"  /desensitize model openai:<name>           {_HELP_L('switch to an OpenAI-compatible endpoint', '切到 OpenAI 兼容端点')}\n"
+            f"  /desensitize model siliconflow:<name>      {_HELP_L('switch to SiliconFlow', '切到 SiliconFlow')}\n"
+            f"  /desensitize timeout <seconds>             {_HELP_L('set LLM timeout', '设置 LLM 超时')}\n"
+            f"  /desensitize chunk <characters>            {_HELP_L('set chunk size', '设置分段大小')}\n"
             f"\n"
-            f"{L('When an OpenAI-compatible endpoint is used, base_url comes from config llm.base_url or OPENAI_BASE_URL; it falls back to api.siliconflow.cn when neither is set.', '使用 OpenAI 兼容端点时，base_url 读配置 llm.base_url 或 OPENAI_BASE_URL；两者都未设置时回退到 api.siliconflow.cn。')}"
+            f"{_HELP_L('Output language is ui.language (both|en|zh, default both); /desensitize lang overrides it for this session. This help is shown in help_language (default en) so it stays readable before the language is set.', '输出语言由 ui.language 控制（both|en|zh，默认 both）；/desensitize lang 可在本次会话覆盖。本帮助用 help_language（默认 en）渲染，以便在语言尚未设置时也能读懂。')}\n"
+            f"\n"
+            f"{_HELP_L('When an OpenAI-compatible endpoint is used, base_url comes from config llm.base_url or OPENAI_BASE_URL; it falls back to api.siliconflow.cn when neither is set.', '使用 OpenAI 兼容端点时，base_url 读配置 llm.base_url 或 OPENAI_BASE_URL；两者都未设置时回退到 api.siliconflow.cn。')}"
         )
 
 
@@ -1141,7 +1190,7 @@ def register(ctx):
         name="desensitize",
         handler=_handle_desensitize,
         description="Manage Chinese-context desensitization (LLM semantic layer + regex fallback)",
-        args_hint="on|off|status|model|timeout|chunk",
+        args_hint="on|off|status|lang|model|timeout|chunk",
     )
 
     log.info(
