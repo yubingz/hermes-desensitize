@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-desensitize"
-version = "1.4.0"
+version = "1.4.1"
 description = "Chinese-context desensitization for Hermes Agent — LLM semantic layer with regex fallback, reversible placeholders"
 readme = "README.md"
 requires-python = ">=3.9"
