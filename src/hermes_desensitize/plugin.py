@@ -11,6 +11,7 @@
 
 不依赖外部代理，不改 base_url，始终可用。
 """
+from __future__ import annotations
 
 import difflib
 import json
