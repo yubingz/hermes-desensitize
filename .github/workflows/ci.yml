@@ -1,8 +1,5 @@
 name: CI
 
-# 独立验证 hermes-desensitize：不依赖上游 CI，push 即跑。
-# 与上游 plugin-catalog-ci.yml 的两道 gate 对齐，但不需要 hermes CLI（runner 上没有安装）。
-
 on:
   push:
     branches: [master, main]
@@ -17,6 +14,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  debug:
+    name: diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Print environment and file facts
+        run: |
+          echo "=== pwd ==="; pwd
+          echo "=== git head ==="; git log --oneline -3
+          echo "=== repo tree (top 2 levels) ==="; find . -maxdepth 2 -not -path './.git/*' | sort
+          echo "=== pyproject version line ==="; grep -n '^version' pyproject.toml || echo "NO VERSION LINE"
+          echo "=== plugin.yaml version line ==="; grep -n '^version' src/hermes_desensitize/plugin.yaml || echo "NO VERSION LINE"
+          echo "=== python version ==="; python --version
+          echo "=== pip list (jieba/yaml) ==="; pip list 2>/dev/null | grep -iE 'jieba|yaml' || echo "none installed"
+
   test:
     name: tests + manifest contract
     runs-on: ubuntu-latest
@@ -25,53 +41,47 @@ jobs:
       matrix:
         python-version: ["3.9", "3.11", "3.13"]
     timeout-minutes: 15
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
       - name: Install dependencies
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           pip install "jieba>=0.42,<1" "PyYAML>=6,<7"
           pip install -e .
-
+          echo "--- installed ---"
+          pip list 2>/dev/null | grep -iE 'jieba|yaml|hermes-desensitize' || true
       - name: Verify plugin imports
         run: |
-          set -euo pipefail
+          python -c "import sys; print(sys.version)"
           python -c "import hermes_desensitize.plugin as m; print('import ok:', m.__name__)"
-
       - name: Verify manifest loads
         run: |
-          set -euo pipefail
-          python - <<'PY'
+          cat > /tmp/check_manifest.py <<'PYFILE'
           import pathlib
+          import sys
           import yaml
           root = pathlib.Path("src/hermes_desensitize")
+          print("manifest path exists:", (root / "plugin.yaml").exists())
           man = yaml.safe_load((root / "plugin.yaml").read_text(encoding="utf-8"))
-          assert man.get("name") == "desensitize", man.get("name")
-          assert man.get("version"), "plugin.yaml missing version"
+          print("manifest keys:", sorted(man.keys()))
+          assert man.get("name") == "desensitize", "name=%r" % man.get("name")
+          assert man.get("version"), "missing version"
           hooks = man.get("provides_hooks") or []
           assert hooks, "provides_hooks empty"
-          print(f"manifest ok: {man['name']} {man['version']} hooks={hooks}")
-          PY
-
-      # 测试脚本自带 sys.exit(1) 失败契约，直接裸跑（不是 pytest 用例）
+          print("manifest ok: %s %s hooks=%s" % (man["name"], man["version"], hooks))
+          PYFILE
+          python /tmp/check_manifest.py
       - name: Run behavior tests
         run: |
-          set -euo pipefail
-          for f in tests/test_config.py tests/test_plugin_behavior.py \
-                   tests/test_regex_regression.py tests/test_behavior_parity.py \
-                   tests/test_ui_language.py; do
+          set -x
+          for f in tests/test_config.py tests/test_plugin_behavior.py tests/test_regex_regression.py tests/test_behavior_parity.py tests/test_ui_language.py; do
             echo "::group::$f"
             python "$f"
             echo "::endgroup::"
           done
-        working-directory: ${{ github.workspace }}
         env:
           PYTHONPATH: ${{ github.workspace }}/src
           PYTHONIOENCODING: utf-8
@@ -80,69 +90,70 @@ jobs:
     name: version consistency
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
+      - name: Install yaml
+        run: pip install "PyYAML>=6,<7"
       - name: Manifest version must match pyproject version
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import pathlib, re, sys, yaml
-          man = yaml.safe_load(pathlib.Path("src/hermes_desensitize/plugin.yaml").read_text(encoding="utf-8"))
+          cat > /tmp/check_version.py <<'PYFILE'
+          import pathlib
+          import re
+          import sys
+          import yaml
+
+          man_path = pathlib.Path("src/hermes_desensitize/plugin.yaml")
+          pt_path = pathlib.Path("pyproject.toml")
+          print("plugin.yaml exists:", man_path.exists())
+          print("pyproject.toml exists:", pt_path.exists())
+
+          man = yaml.safe_load(man_path.read_text(encoding="utf-8"))
           mv = str(man.get("version", "")).strip()
-          pt = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          pt = pt_path.read_text(encoding="utf-8")
           m = re.search(r'^version\s*=\s*"([^"]+)"', pt, re.M)
           if not m:
-              sys.exit("pyproject.toml has no project.version")
+              sys.exit("pyproject.toml has no project.version; first 400 chars:\n" + pt[:400])
           pv = m.group(1).strip()
-          print(f"plugin.yaml={mv}  pyproject.toml={pv}")
+          print("plugin.yaml=%s  pyproject.toml=%s" % (mv, pv))
           if mv != pv:
-              sys.exit(f"VERSION MISMATCH: plugin.yaml={mv} != pyproject.toml={pv}")
+              sys.exit("VERSION MISMATCH: plugin.yaml=%s != pyproject.toml=%s" % (mv, pv))
           print("version consistent")
-          PY
+          PYFILE
+          python /tmp/check_version.py
 
   offline:
     name: regex fallback works with no LLM
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           pip install "jieba>=0.42,<1" "PyYAML>=6,<7"
           pip install -e .
-
-      # 插件承诺"模型不可用时仍能工作"，这里把 LLM 端点指向黑洞端口验证降级路径
       - name: Fallback path must not raise
         env:
           PYTHONPATH: ${{ github.workspace }}/src
           PYTHONIOENCODING: utf-8
           HERMES_DESENSITIZE_BASE_URL: "http://127.0.0.1:9"
         run: |
-          set -euo pipefail
-          timeout 120 python - <<'PY'
+          cat > /tmp/check_offline.py <<'PYFILE'
           import hermes_desensitize.plugin as mod
           text = "联系人电话13800138000，身份证110101199001011234，邮箱a@b.com"
-          # 不带 LLM 的纯正则路径必须可用
           fn = getattr(mod, "regex_desensitize", None) or getattr(mod, "fast_desensitize", None)
           if fn is None:
-              print("no dedicated regex entrypoint; exercising full path instead")
+              print("no dedicated regex entrypoint; exercising full path")
               out = mod.desensitize(text) if hasattr(mod, "desensitize") else None
           else:
               out = fn(text)
           assert out is not None, "fallback produced None"
           print("fallback ok:", str(out)[:120])
-          PY
+          PYFILE
+          timeout 120 python /tmp/check_offline.py
