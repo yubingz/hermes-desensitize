@@ -1,0 +1,148 @@
+name: CI
+
+# 独立验证 hermes-desensitize：不依赖上游 CI，push 即跑。
+# 与上游 plugin-catalog-ci.yml 的两道 gate 对齐，但不需要 hermes CLI（runner 上没有安装）。
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests + manifest contract
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install "jieba>=0.42,<1" "PyYAML>=6,<7"
+          pip install -e .
+
+      - name: Verify plugin imports
+        run: |
+          set -euo pipefail
+          python -c "import hermes_desensitize.plugin as m; print('import ok:', m.__name__)"
+
+      - name: Verify manifest loads
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import yaml
+          root = pathlib.Path("src/hermes_desensitize")
+          man = yaml.safe_load((root / "plugin.yaml").read_text(encoding="utf-8"))
+          assert man.get("name") == "desensitize", man.get("name")
+          assert man.get("version"), "plugin.yaml missing version"
+          hooks = man.get("provides_hooks") or []
+          assert hooks, "provides_hooks empty"
+          print(f"manifest ok: {man['name']} {man['version']} hooks={hooks}")
+          PY
+
+      # 测试脚本自带 sys.exit(1) 失败契约，直接裸跑（不是 pytest 用例）
+      - name: Run behavior tests
+        run: |
+          set -euo pipefail
+          for f in tests/test_config.py tests/test_plugin_behavior.py \
+                   tests/test_regex_regression.py tests/test_behavior_parity.py \
+                   tests/test_ui_language.py; do
+            echo "::group::$f"
+            python "$f"
+            echo "::endgroup::"
+          done
+        working-directory: ${{ github.workspace }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+          PYTHONIOENCODING: utf-8
+
+  consistency:
+    name: version consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Manifest version must match pyproject version
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib, re, sys, yaml
+          man = yaml.safe_load(pathlib.Path("src/hermes_desensitize/plugin.yaml").read_text(encoding="utf-8"))
+          mv = str(man.get("version", "")).strip()
+          pt = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          m = re.search(r'^version\s*=\s*"([^"]+)"', pt, re.M)
+          if not m:
+              sys.exit("pyproject.toml has no project.version")
+          pv = m.group(1).strip()
+          print(f"plugin.yaml={mv}  pyproject.toml={pv}")
+          if mv != pv:
+              sys.exit(f"VERSION MISMATCH: plugin.yaml={mv} != pyproject.toml={pv}")
+          print("version consistent")
+          PY
+
+  offline:
+    name: regex fallback works with no LLM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install "jieba>=0.42,<1" "PyYAML>=6,<7"
+          pip install -e .
+
+      # 插件承诺"模型不可用时仍能工作"，这里把 LLM 端点指向黑洞端口验证降级路径
+      - name: Fallback path must not raise
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+          PYTHONIOENCODING: utf-8
+          HERMES_DESENSITIZE_BASE_URL: "http://127.0.0.1:9"
+        run: |
+          set -euo pipefail
+          timeout 120 python - <<'PY'
+          import hermes_desensitize.plugin as mod
+          text = "联系人电话13800138000，身份证110101199001011234，邮箱a@b.com"
+          # 不带 LLM 的纯正则路径必须可用
+          fn = getattr(mod, "regex_desensitize", None) or getattr(mod, "fast_desensitize", None)
+          if fn is None:
+              print("no dedicated regex entrypoint; exercising full path instead")
+              out = mod.desensitize(text) if hasattr(mod, "desensitize") else None
+          else:
+              out = fn(text)
+          assert out is not None, "fallback produced None"
+          print("fallback ok:", str(out)[:120])
+          PY
