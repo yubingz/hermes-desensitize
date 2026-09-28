@@ -4,6 +4,7 @@ Hermes 的插件加载器要求**包根**暴露 :func:`register`，而实现体�
 :mod:`hermes_desensitize.plugin`。此处显式转发；其余公开符号一并转出，
 方便 ``from hermes_desensitize import regex_desensitize`` 这类直接用法。
 """
+from __future__ import annotations
 
 from .plugin import (  # noqa: F401
     PATTERNS,
