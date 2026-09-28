@@ -136,7 +136,7 @@ _QUANTITY_ENABLED = True
 _QUANTITY_KEYWORDS = "产能|产量|产值|年产|月产|日产|营收|销售额|利润|市场份额|市值|估值"
 _PATH_PATTERNS: list = []
 
-_OLLAMA_BASE: str | None = None     # Ollama 地址（仅 provider=ollama 时使用）
+_OLLAMA_BASE: Optional[str] = None  # Ollama 地址（仅 provider=ollama 时使用）
 _SILICONFLOW_BASE = "https://api.siliconflow.cn/v1"
 
 
